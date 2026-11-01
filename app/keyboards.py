@@ -54,6 +54,22 @@ def warning_kb(sub: dict) -> InlineKeyboardMarkup | None:
     )
 
 
+def admin_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Цены", callback_data="admin:prices"),
+                InlineKeyboardButton(text="Промокоды", callback_data="admin:promos"),
+            ],
+            [
+                InlineKeyboardButton(text="Сводка", callback_data="admin:stats"),
+                InlineKeyboardButton(text="Реестр", callback_data="admin:export"),
+            ],
+            [InlineKeyboardButton(text="Команды", callback_data="admin:help")],
+        ]
+    )
+
+
 def status_kb(autopay: bool) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text="Тарифы", callback_data="plans")]]
     if autopay:

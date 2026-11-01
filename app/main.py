@@ -7,7 +7,7 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand, LinkPreviewOptions
+from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, LinkPreviewOptions
 
 from app.bot import build_router
 from app.config import Config
@@ -40,14 +40,28 @@ async def run() -> None:
         )
         me = await bot.get_me()
         runtime.username = me.username
-        await bot.set_my_commands(
-            [
-                BotCommand(command="start", description="Тарифы Private"),
-                BotCommand(command="status", description="Мой доступ"),
-                BotCommand(command="stop", description="Отменить автопродление"),
-                BotCommand(command="id", description="Мой Telegram id"),
-            ]
-        )
+        public_commands = [
+            BotCommand(command="start", description="Тарифы Private"),
+            BotCommand(command="status", description="Мой доступ"),
+            BotCommand(command="stop", description="Отменить автопродление"),
+            BotCommand(command="id", description="Мой Telegram id"),
+        ]
+        admin_commands = public_commands + [
+            BotCommand(command="admin", description="Админка"),
+            BotCommand(command="price", description="Цены и акции"),
+            BotCommand(command="promo", description="Промокоды"),
+            BotCommand(command="grant", description="Выдать доступ"),
+            BotCommand(command="who", description="Карточка человека"),
+            BotCommand(command="stats", description="Сводка"),
+            BotCommand(command="export", description="Реестр CSV"),
+            BotCommand(command="refund", description="Возврат платежа"),
+        ]
+        await bot.set_my_commands(public_commands, scope=BotCommandScopeDefault())
+        for admin_id in cfg.admin_ids:
+            try:
+                await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
+            except Exception:
+                log.exception("admin commands were not set for %s", admin_id)
     app = build_app(runtime, bot)
     runner = web.AppRunner(app)
     await runner.setup()

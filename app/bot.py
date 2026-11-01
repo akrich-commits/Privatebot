@@ -21,7 +21,7 @@ from app.pricing import (
     period_title,
     utcnow,
 )
-from app.keyboards import confirm_kb, pay_kb, status_kb, tariffs_kb
+from app.keyboards import admin_kb, confirm_kb, pay_kb, status_kb, tariffs_kb
 from app.runtime import Runtime
 from app.service import grant_access, quoted_price, start_checkout, sync_payment
 from app.tbank import TBankError, parse_note
@@ -113,6 +113,61 @@ def end_of_day(text: str) -> datetime:
     if len(year) == 2:
         year = "20" + year
     return datetime(int(year), int(month), int(day), 23, 59, tzinfo=MOSCOW)
+
+
+async def prices_text(db: Database) -> str:
+    lines = ["<b>Цены</b>"]
+    now = utcnow()
+    for plan in await db.plans():
+        line = f"{plan['months']} мес. — {fmt_rub(current_price(plan, now))}"
+        if on_sale(plan, now):
+            until = parse_dt(plan["sale_until"])
+            when = fmt_when(until) if until else "—"
+            line += f"\nакция до {when}, обычная {fmt_rub(int(plan['price_kopecks']))}"
+        lines.append(line)
+    lines.append("")
+    lines.append("/price 12 37990 — обычная цена")
+    lines.append("/price 12 28490 10.11.2026 — акция до конца этого дня")
+    lines.append("/price 12 clear — убрать акцию")
+    return "\n".join(lines)
+
+
+async def promos_text(db: Database) -> str:
+    rows = await db.promos()
+    lines = ["<b>Промокоды</b>"]
+    if not rows:
+        lines.append("Пока нет.")
+    for promo in rows:
+        if promo["used_by"]:
+            state = "использован"
+        elif promo["disabled"]:
+            state = "выключен"
+        else:
+            state = "активен"
+        scope = period_title(int(promo["months"])) if promo["months"] else "все сроки"
+        value = f"{promo['value']}%" if promo["kind"] == "percent" else fmt_rub(int(promo["value"]))
+        lines.append(f"{esc(promo['code'])} — {value}, {scope}, {state}")
+    lines.append("")
+    lines.append("/promo NEWYEAR 20% 12 — минус 20% только на 12 месяцев")
+    lines.append("/promo NEWYEAR 20% — на все сроки")
+    lines.append("/promo GIFT 28490 12 30.11.2026 — конечная цена до конца дня")
+    lines.append("/promo off NEWYEAR — выключить")
+    return "\n".join(lines)
+
+
+ADMIN_HELP = (
+    "<b>Админка</b>\n"
+    "Кнопки ниже открывают цены, промокоды, сводку и реестр. "
+    "Менять цифры нужно командой.\n\n"
+    "/price — цены и акции\n"
+    "/promo — одноразовые промокоды\n"
+    "/grant 123456789 12 — выдать срок без оплаты\n"
+    "/who 123456789 — карточка человека, можно и @ник\n"
+    "/stats — сколько доступов и какая сумма в реестре\n"
+    "/export — файл реестра\n"
+    "/refund id — вернуть платёж, когда будет подключён Т-Банк\n\n"
+    "Канал: перешлите сюда любой пост из Private."
+)
 
 
 def build_router(runtime: Runtime) -> Router:
@@ -293,26 +348,46 @@ def build_router(runtime: Runtime) -> Router:
         user = await touch(runtime, message)
         if user is None or not is_admin(runtime, message.from_user.id if message.from_user else None):
             return
-        await message.answer(
-            "<b>Цены</b>\n"
-            "/price — показать\n"
-            "/price 12 37990 — обычная цена\n"
-            "/price 12 28490 10.11.2026 — акция до конца этого дня\n"
-            "/price 12 clear — убрать акцию\n\n"
-            "<b>Промокоды</b>\n"
-            "/promo — список\n"
-            "/promo NEWYEAR 20% 12 — минус 20% на 12 месяцев\n"
-            "/promo NEWYEAR 20% — на все сроки\n"
-            "/promo GIFT 28490 12 30.11.2026 — конечная цена\n"
-            "/promo off NEWYEAR — выключить\n\n"
-            "<b>Доступ</b>\n"
-            "/grant 123456789 12 — выдать срок без оплаты\n"
-            "/refund payment_id — вернуть платёж и закрыть доступ\n"
-            "/who 123456789 — карточка\n"
-            "/stats — сводка\n"
-            "/export — реестр CSV\n\n"
-            "Перешлите сюда любой пост канала, и я запомню его для ссылок."
-        )
+        await message.answer(ADMIN_HELP, reply_markup=admin_kb())
+
+    @router.callback_query(F.data.startswith("admin:"))
+    async def admin_panel(query: CallbackQuery) -> None:
+        if query.from_user is None or not is_admin(runtime, query.from_user.id):
+            await query.answer("Недоступно", show_alert=True)
+            return
+        action = (query.data or "").split(":", 1)[1]
+        if action == "prices":
+            await query.answer()
+            if query.message is not None:
+                await query.message.answer(await prices_text(db), reply_markup=admin_kb())
+            return
+        if action == "promos":
+            await query.answer()
+            if query.message is not None:
+                await query.message.answer(await promos_text(db), reply_markup=admin_kb())
+            return
+        if action == "stats":
+            await query.answer()
+            stats = await db.stats()
+            if query.message is not None:
+                await query.message.answer(
+                    f"Активных доступов: {stats['active']}\n"
+                    f"Сумма реестра без возвратов: {fmt_rub(int(stats['paid']))}",
+                    reply_markup=admin_kb(),
+                )
+            return
+        if action == "export":
+            await query.answer()
+            path = await db.ledger_csv()
+            if query.message is not None:
+                await query.message.answer_document(
+                    FSInputFile(path),
+                    caption="Реестр: почта, ник, срок, сумма, период.",
+                )
+            return
+        await query.answer()
+        if query.message is not None:
+            await query.message.answer(ADMIN_HELP, reply_markup=admin_kb())
 
     @router.message(Command("price"))
     async def price_cmd(message: Message, command: CommandObject) -> None:
@@ -320,17 +395,13 @@ def build_router(runtime: Runtime) -> Router:
             return
         args = (command.args or "").split()
         if not args:
-            lines = []
-            now = utcnow()
-            for plan in await db.plans():
-                line = f"{plan['months']} мес. — {fmt_rub(current_price(plan, now))}"
-                if on_sale(plan, now):
-                    until = parse_dt(plan["sale_until"])
-                    line += f" (акция до {fmt_when(until) if until else '—'}, обычная {fmt_rub(int(plan['price_kopecks']))})"
-                lines.append(line)
-            await message.answer("\n".join(lines))
+            await message.answer(await prices_text(db), reply_markup=admin_kb())
             return
-        months = int(args[0])
+        try:
+            months = int(args[0])
+        except ValueError:
+            await message.answer("Тариф: 1, 3, 6 или 12.")
+            return
         if await db.plan(months) is None:
             await message.answer("Тариф: 1, 3, 6 или 12.")
             return
@@ -341,9 +412,13 @@ def build_router(runtime: Runtime) -> Router:
             await db.set_sale(months, None, None)
             await message.answer(f"Акция на {period_title(months)} выключена.")
             return
-        amount = rub_to_kopecks(args[1])
-        if len(args) >= 3:
-            until = end_of_day(args[2])
+        try:
+            amount = rub_to_kopecks(args[1])
+            until = end_of_day(args[2]) if len(args) >= 3 else None
+        except ValueError:
+            await message.answer("Цена — число в рублях. Дата акции — ДД.ММ.ГГГГ.")
+            return
+        if until is not None:
             await db.set_sale(months, amount, iso(until))
             await message.answer(f"Акция: {period_title(months)} за {fmt_rub(amount)} до {fmt_when(until)}.")
             return
@@ -356,20 +431,7 @@ def build_router(runtime: Runtime) -> Router:
             return
         args = (command.args or "").split()
         if not args:
-            rows = await db.promos()
-            if not rows:
-                await message.answer("Промокодов нет.")
-                return
-            lines = []
-            for promo in rows:
-                state = "использован" if promo["used_by"] else "выключен" if promo["disabled"] else "активен"
-                scope = period_title(int(promo["months"])) if promo["months"] else "все сроки"
-                if promo["kind"] == "percent":
-                    value = f"{promo['value']}%"
-                else:
-                    value = fmt_rub(int(promo["value"]))
-                lines.append(f"{promo['code']} — {value}, {scope}, {state}")
-            await message.answer("\n".join(lines))
+            await message.answer(await promos_text(db), reply_markup=admin_kb())
             return
         if args[0].lower() == "off" and len(args) == 2:
             await db.disable_promo(args[1])
@@ -388,17 +450,21 @@ def build_router(runtime: Runtime) -> Router:
             if await db.plan(months) is None:
                 await message.answer("Тариф: 1, 3, 6 или 12.")
                 return
-        if rest:
-            expires = iso(end_of_day(rest[0]))
-        if raw_value.endswith("%"):
-            kind = "percent"
-            value = int(raw_value[:-1])
-            if not 1 <= value <= 99:
-                await message.answer("Процент от 1 до 99.")
-                return
-        else:
-            kind = "final"
-            value = rub_to_kopecks(raw_value)
+        try:
+            if rest:
+                expires = iso(end_of_day(rest[0]))
+            if raw_value.endswith("%"):
+                kind = "percent"
+                value = int(raw_value[:-1])
+                if not 1 <= value <= 99:
+                    await message.answer("Процент от 1 до 99.")
+                    return
+            else:
+                kind = "final"
+                value = rub_to_kopecks(raw_value)
+        except ValueError:
+            await message.answer("Формат: /promo КОД 20% 12 или /promo КОД 28490 12 30.11.2026")
+            return
         try:
             await db.create_promo(code, kind, value, months, expires)
         except Exception:
@@ -414,7 +480,11 @@ def build_router(runtime: Runtime) -> Router:
         if len(args) != 2:
             await message.answer("Формат: /grant 123456789 12")
             return
-        months = int(args[1])
+        try:
+            months = int(args[1])
+        except ValueError:
+            await message.answer("Формат: /grant 123456789 12")
+            return
         if await db.plan(months) is None:
             await message.answer("Тариф: 1, 3, 6 или 12.")
             return
@@ -459,7 +529,14 @@ def build_router(runtime: Runtime) -> Router:
         if message.from_user is None or not is_admin(runtime, message.from_user.id):
             return
         token = (command.args or "").strip()
-        person = await db.user_by_username(token) if token.startswith("@") else await db.user(int(token))
+        if not token:
+            await message.answer("Формат: /who 123456789 или /who @nick")
+            return
+        try:
+            person = await db.user_by_username(token) if token.startswith("@") else await db.user(int(token))
+        except ValueError:
+            await message.answer("Формат: /who 123456789 или /who @nick")
+            return
         if person is None:
             await message.answer("Не найден. Нужен /start в боте.")
             return
