@@ -5,9 +5,9 @@ import logging
 import re
 from datetime import datetime
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, FSInputFile, Message, MessageOriginChannel
+from aiogram.types import CallbackQuery, ChatMemberUpdated, FSInputFile, Message, MessageOriginChannel
 
 from app.db import Database
 from app.pricing import (
@@ -166,7 +166,7 @@ ADMIN_HELP = (
     "/stats — сколько доступов и какая сумма в реестре\n"
     "/export — файл реестра\n"
     "/refund id — вернуть платёж, когда будет подключён Т-Банк\n\n"
-    "Канал: перешлите сюда любой пост из Private."
+    "Канал запоминается сам, когда вы назначаете бота администратором Private."
 )
 
 
@@ -572,11 +572,62 @@ def build_router(runtime: Runtime) -> Router:
     async def bind_channel(message: Message) -> None:
         await remember_channel(runtime, message)
 
+    @router.my_chat_member()
+    async def bot_added_to_channel(event: ChatMemberUpdated) -> None:
+        log.info(
+            "bot status in %s (%s) is %s, changed by %s",
+            event.chat.id,
+            event.chat.type,
+            event.new_chat_member.status,
+            event.from_user.id,
+        )
+        if event.chat.type != "channel":
+            return
+        if event.new_chat_member.status not in {"administrator", "creator"}:
+            return
+        if not await owner_runs_channel(event.bot, runtime, event.chat.id, event.from_user.id):
+            return
+        notify = event.from_user.id if is_admin(runtime, event.from_user.id) else next(iter(runtime.cfg.admin_ids))
+        await save_channel(runtime, event.bot, event.chat.id, event.chat.title or "", notify)
+
+    @router.channel_post()
+    async def remember_from_post(message: Message) -> None:
+        if runtime.cfg.channel_id or await runtime.db.setting("channel_id") or message.bot is None:
+            return
+        if not await owner_runs_channel(message.bot, runtime, message.chat.id, None):
+            return
+        await save_channel(
+            runtime,
+            message.bot,
+            message.chat.id,
+            message.chat.title or "",
+            next(iter(runtime.cfg.admin_ids)),
+        )
+
     return router
 
 
+async def owner_runs_channel(bot: Bot, runtime: Runtime, chat_id: int, actor_id: int | None) -> bool:
+    if is_admin(runtime, actor_id):
+        return True
+    try:
+        admins = await bot.get_chat_administrators(chat_id)
+    except Exception:
+        log.exception("cannot read admins of %s", chat_id)
+        return False
+    return any(is_admin(runtime, member.user.id) for member in admins)
+
+
+async def save_channel(runtime: Runtime, bot: Bot, chat_id: int, title: str, notify_id: int) -> None:
+    if runtime.cfg.channel_id and runtime.cfg.channel_id != chat_id:
+        await bot.send_message(notify_id, "В настройках уже указан другой CHANNEL_ID. Он и используется.")
+        return
+    await runtime.db.set_setting("channel_id", str(chat_id))
+    await bot.send_message(notify_id, f"Канал запомнен: {esc(title)} <code>{chat_id}</code>")
+
+
 async def remember_channel(runtime: Runtime, message: Message) -> bool:
-    if message.from_user is None or not is_admin(runtime, message.from_user.id):
+    if message.from_user is None or not is_admin(runtime, message.from_user.id) or message.bot is None:
         return False
     origin = message.forward_origin
     chat_id = None
@@ -589,9 +640,5 @@ async def remember_channel(runtime: Runtime, message: Message) -> bool:
         title = message.forward_from_chat.title or ""
     if chat_id is None:
         return False
-    if runtime.cfg.channel_id and runtime.cfg.channel_id != chat_id:
-        await message.answer("В настройках уже указан другой CHANNEL_ID. Он и используется.")
-        return True
-    await runtime.db.set_setting("channel_id", str(chat_id))
-    await message.answer(f"Канал запомнен: {esc(title)} <code>{chat_id}</code>")
+    await save_channel(runtime, message.bot, chat_id, title, message.from_user.id)
     return True
