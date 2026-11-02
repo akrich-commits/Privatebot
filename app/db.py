@@ -37,7 +37,17 @@ CREATE TABLE IF NOT EXISTS promos (
     reserved_by INTEGER,
     reserved_order TEXT,
     reserved_until TEXT,
-    disabled INTEGER NOT NULL DEFAULT 0
+    disabled INTEGER NOT NULL DEFAULT 0,
+    shared INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS promo_redemptions (
+    code TEXT NOT NULL,
+    telegram_id INTEGER NOT NULL,
+    order_id TEXT,
+    state TEXT NOT NULL,
+    until_at TEXT,
+    used_at TEXT,
+    PRIMARY KEY (code, telegram_id)
 );
 CREATE TABLE IF NOT EXISTS payments (
     order_id TEXT PRIMARY KEY,
@@ -112,12 +122,20 @@ class Database:
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.executescript(SCHEMA)
+        await self._migrate()
         for months, title, price in SEED:
             await self._db.execute(
                 "INSERT OR IGNORE INTO plans (months, title, price_kopecks) VALUES (?, ?, ?)",
                 (months, title, price),
             )
         await self._db.commit()
+
+    async def _migrate(self) -> None:
+        assert self._db is not None
+        cur = await self._db.execute("PRAGMA table_info(promos)")
+        columns = {row[1] for row in await cur.fetchall()}
+        if "shared" not in columns:
+            await self._db.execute("ALTER TABLE promos ADD COLUMN shared INTEGER NOT NULL DEFAULT 0")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -232,14 +250,15 @@ class Database:
         value: int,
         months: int | None,
         expires_at: str | None,
+        shared: bool = False,
     ) -> None:
         async with self._lock:
             await self.db.execute(
                 """
-                INSERT INTO promos (code, kind, value, months, expires_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO promos (code, kind, value, months, expires_at, shared)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (code, kind, value, months, expires_at),
+                (code, kind, value, months, expires_at, 1 if shared else 0),
             )
             await self.db.commit()
 
@@ -292,6 +311,10 @@ class Database:
                 """,
                 (order_id,),
             )
+            await self.db.execute(
+                "DELETE FROM promo_redemptions WHERE order_id = ? AND state = 'hold'",
+                (order_id,),
+            )
             await self.db.commit()
 
     async def release_expired_reservations(self, now: str) -> None:
@@ -303,6 +326,76 @@ class Database:
                 WHERE used_by IS NULL AND reserved_until IS NOT NULL AND reserved_until < ?
                 """,
                 (now,),
+            )
+            await self.db.execute(
+                """
+                DELETE FROM promo_redemptions
+                WHERE state = 'hold' AND until_at IS NOT NULL AND until_at < ?
+                """,
+                (now,),
+            )
+            await self.db.commit()
+
+    async def shared_promo_used(self, code: str, telegram_id: int) -> bool:
+        async with self._lock:
+            cur = await self.db.execute(
+                """
+                SELECT 1 FROM promo_redemptions
+                WHERE code = ? AND telegram_id = ? AND state = 'used'
+                """,
+                (code.upper(), telegram_id),
+            )
+            row = await cur.fetchone()
+        return row is not None
+
+    async def shared_use_counts(self) -> dict[str, int]:
+        async with self._lock:
+            cur = await self.db.execute(
+                """
+                SELECT code, COUNT(*) AS n FROM promo_redemptions
+                WHERE state = 'used' GROUP BY code
+                """
+            )
+            rows = await cur.fetchall()
+        return {str(row["code"]): int(row["n"]) for row in rows}
+
+    async def reserve_shared_promo(self, code: str, telegram_id: int, order_id: str, until: str) -> bool:
+        async with self._lock:
+            cur = await self.db.execute(
+                "SELECT state FROM promo_redemptions WHERE code = ? AND telegram_id = ?",
+                (code, telegram_id),
+            )
+            row = await cur.fetchone()
+            if row is not None and row["state"] == "used":
+                return False
+            await self.db.execute(
+                """
+                INSERT INTO promo_redemptions (code, telegram_id, order_id, state, until_at)
+                VALUES (?, ?, ?, 'hold', ?)
+                ON CONFLICT(code, telegram_id) DO UPDATE SET
+                    order_id = excluded.order_id,
+                    state = 'hold',
+                    until_at = excluded.until_at
+                WHERE promo_redemptions.state = 'hold'
+                """,
+                (code, telegram_id, order_id, until),
+            )
+            await self.db.commit()
+            return True
+
+    async def consume_shared_promo(self, code: str, telegram_id: int, order_id: str, now: str) -> None:
+        async with self._lock:
+            await self.db.execute(
+                """
+                INSERT INTO promo_redemptions (code, telegram_id, order_id, state, until_at, used_at)
+                VALUES (?, ?, ?, 'used', NULL, ?)
+                ON CONFLICT(code, telegram_id) DO UPDATE SET
+                    state = 'used',
+                    order_id = excluded.order_id,
+                    used_at = excluded.used_at,
+                    until_at = NULL
+                """,
+                (code, telegram_id, order_id, now),
             )
             await self.db.commit()
 

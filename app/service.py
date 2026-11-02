@@ -30,23 +30,41 @@ def order_id_for(months: int, telegram_id: int) -> str:
     return f"{months}m-{telegram_id}-{stamp}"[:36]
 
 
-def promo_error(promo: dict | None, months: int, telegram_id: int, now) -> str | None:
+def promo_error(
+    promo: dict | None,
+    months: int,
+    telegram_id: int,
+    now,
+    *,
+    already_used: bool = False,
+) -> str | None:
     if promo is None:
         return "Такого промокода нет."
     if promo["disabled"]:
         return "Промокод выключен."
-    if promo["used_by"]:
-        return "Промокод уже использован."
     expires = parse_dt(promo.get("expires_at"))
     if expires and expires <= now:
         return "Срок промокода вышел."
     if promo["months"] and int(promo["months"]) != months:
         return f"Промокод только на {period_title(int(promo['months']))}."
+    if promo.get("shared"):
+        if already_used:
+            return "Вы уже использовали этот промокод."
+        return None
+    if promo["used_by"]:
+        return "Промокод уже использован."
     reserved_until = parse_dt(promo.get("reserved_until"))
     reserved_by = promo.get("reserved_by")
     if reserved_by and reserved_by != telegram_id and reserved_until and reserved_until > now:
         return "Промокод сейчас удерживается другим человеком. Попробуйте через час."
     return None
+
+
+async def promo_problem(db: Database, promo: dict | None, months: int, telegram_id: int, now) -> str | None:
+    already_used = False
+    if promo is not None and promo.get("shared"):
+        already_used = await db.shared_promo_used(str(promo["code"]), telegram_id)
+    return promo_error(promo, months, telegram_id, now, already_used=already_used)
 
 
 async def quoted_price(db: Database, user: dict, months: int):
@@ -59,7 +77,7 @@ async def quoted_price(db: Database, user: dict, months: int):
     promo = None
     if code:
         promo = await db.promo(code)
-        problem = promo_error(promo, months, int(user["telegram_id"]), now)
+        problem = await promo_problem(db, promo, months, int(user["telegram_id"]), now)
         if problem:
             await db.set_pending(int(user["telegram_id"]), months, None)
             raise ValueError(problem)
@@ -139,15 +157,23 @@ async def start_checkout(
     order_id = order_id_for(months, int(user["telegram_id"]))
     now = utcnow()
     if promo is not None:
-        held = await db.reserve_promo(
-            promo["code"],
-            int(user["telegram_id"]),
-            order_id,
-            iso(now + PROMO_HOLD),
-            iso(now),
-        )
+        if promo.get("shared"):
+            held = await db.reserve_shared_promo(
+                promo["code"],
+                int(user["telegram_id"]),
+                order_id,
+                iso(now + PROMO_HOLD),
+            )
+        else:
+            held = await db.reserve_promo(
+                promo["code"],
+                int(user["telegram_id"]),
+                order_id,
+                iso(now + PROMO_HOLD),
+                iso(now),
+            )
         if not held:
-            raise ValueError("Промокод уже занят.")
+            raise ValueError("Промокод уже использован.")
     await db.create_payment(
         {
             "order_id": order_id,
@@ -244,7 +270,16 @@ async def confirm_payment(db: Database, bot, cfg: Config, payment: dict) -> None
     if payment is None:
         return
     if payment.get("promo_code"):
-        await db.consume_promo(payment["promo_code"], int(payment["telegram_id"]), iso(now))
+        promo = await db.promo(str(payment["promo_code"]))
+        if promo is not None and promo.get("shared"):
+            await db.consume_shared_promo(
+                str(payment["promo_code"]),
+                int(payment["telegram_id"]),
+                str(payment["order_id"]),
+                iso(now),
+            )
+        else:
+            await db.consume_promo(payment["promo_code"], int(payment["telegram_id"]), iso(now))
     sub = await db.subscription(int(payment["telegram_id"]))
     current_end = parse_dt(sub["access_until"]) if sub else None
     start = current_end if current_end and current_end > now else now

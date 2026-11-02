@@ -12,7 +12,7 @@ from app.db import Database
 from app.http import build_app
 from app.runtime import Runtime
 from app.pricing import add_months, apply_promo, current_price, utcnow
-from app.service import apply_note, confirm_payment, promo_error, start_checkout
+from app.service import apply_note, confirm_payment, promo_error, promo_problem, start_checkout
 from app.tbank import BankNote, bank_ssl_context, make_token, verify_notification
 
 
@@ -172,6 +172,24 @@ class BillingTest(unittest.IsolatedAsyncioTestCase):
         now = utcnow().isoformat()
         self.assertTrue(await self.db.reserve_promo("GIFT", 7, "order-a", now, "2000-01-01T00:00:00+00:00"))
         self.assertFalse(await self.db.reserve_promo("GIFT", 8, "order-b", now, "2000-01-01T00:00:00+00:00"))
+
+    async def test_shared_promo_is_once_per_person(self):
+        await self.db.create_promo("SALE", "percent", 20, None, None, shared=True)
+        promo = await self.db.promo("sale")
+        now = utcnow()
+        until = (now + timedelta(hours=1)).isoformat()
+        self.assertIsNone(await promo_problem(self.db, promo, 1, 7, now))
+        self.assertIsNone(await promo_problem(self.db, promo, 12, 8, now))
+        self.assertTrue(await self.db.reserve_shared_promo("SALE", 7, "order-a", until))
+        self.assertTrue(await self.db.reserve_shared_promo("SALE", 8, "order-b", until))
+        await self.db.consume_shared_promo("SALE", 7, "order-a", now.isoformat())
+        self.assertEqual(
+            await promo_problem(self.db, promo, 1, 7, now),
+            "Вы уже использовали этот промокод.",
+        )
+        self.assertIsNone(await promo_problem(self.db, promo, 1, 8, now))
+        self.assertFalse(await self.db.reserve_shared_promo("SALE", 7, "order-c", until))
+        self.assertEqual((await self.db.shared_use_counts())["SALE"], 1)
 
     async def test_confirm_is_idempotent_and_refund_removes_access(self):
         await self.db.upsert_user(7, "nick", "Ник")

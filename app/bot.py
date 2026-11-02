@@ -23,7 +23,7 @@ from app.pricing import (
 )
 from app.keyboards import admin_kb, confirm_kb, pay_kb, status_kb, tariffs_kb
 from app.runtime import Runtime
-from app.service import grant_access, quoted_price, start_checkout, sync_payment
+from app.service import grant_access, promo_problem, quoted_price, start_checkout, sync_payment
 from app.tbank import TBankError, parse_note
 
 log = logging.getLogger("bot")
@@ -96,7 +96,10 @@ async def show_confirm(runtime: Runtime, message: Message, user: dict) -> None:
     if sale and promo is None:
         lines.append(f"Обычная цена {fmt_rub(int(plan['price_kopecks']))}, сейчас акция.")
     if promo is not None:
-        lines.append(f"Промокод {esc(promo['code'])} применён. После оплаты он сгорает.")
+        if promo.get("shared"):
+            lines.append(f"Промокод {esc(promo['code'])} применён.")
+        else:
+            lines.append(f"Промокод {esc(promo['code'])} применён. После оплаты он сгорает.")
     await message.answer("\n".join(lines), reply_markup=confirm_kb())
 
 
@@ -134,23 +137,28 @@ async def prices_text(db: Database) -> str:
 
 async def promos_text(db: Database) -> str:
     rows = await db.promos()
+    counts = await db.shared_use_counts()
     lines = ["<b>Промокоды</b>"]
     if not rows:
         lines.append("Пока нет.")
     for promo in rows:
-        if promo["used_by"]:
-            state = "использован"
-        elif promo["disabled"]:
+        if promo["disabled"]:
             state = "выключен"
+        elif promo.get("shared"):
+            used = counts.get(str(promo["code"]), 0)
+            state = f"оплатили {used}" if used else "ещё никто не оплатил"
+        elif promo["used_by"]:
+            state = "использован"
         else:
             state = "активен"
+        audience = "общий" if promo.get("shared") else "личный"
         scope = period_title(int(promo["months"])) if promo["months"] else "все сроки"
         value = f"{promo['value']}%" if promo["kind"] == "percent" else fmt_rub(int(promo["value"]))
-        lines.append(f"{esc(promo['code'])} — {value}, {scope}, {state}")
+        lines.append(f"{esc(promo['code'])} — {value}, {scope}, {audience}, {state}")
     lines.append("")
-    lines.append("/promo NEWYEAR 20% 12 — минус 20% только на 12 месяцев")
-    lines.append("/promo NEWYEAR 20% — на все сроки")
-    lines.append("/promo GIFT 28490 12 30.11.2026 — конечная цена до конца дня")
+    lines.append("/promo общий NEWYEAR 20% — для всех, каждый один раз")
+    lines.append("/promo общий NEWYEAR 20% 12 30.11.2026 — только 12 месяцев, до конца дня")
+    lines.append("/promo личный GIFT 28490 — для одного человека")
     lines.append("/promo off NEWYEAR — выключить")
     return "\n".join(lines)
 
@@ -160,7 +168,7 @@ ADMIN_HELP = (
     "Кнопки ниже открывают цены, промокоды, сводку и реестр. "
     "Менять цифры нужно командой.\n\n"
     "/price — цены и акции\n"
-    "/promo — одноразовые промокоды\n"
+    "/promo — общий код для всех или личный для одного человека\n"
     "/grant 123456789 12 — выдать срок без оплаты\n"
     "/who 123456789 — карточка человека, можно и @ник\n"
     "/stats — сколько доступов и какая сумма в реестре\n"
@@ -332,9 +340,7 @@ def build_router(runtime: Runtime) -> Router:
                 await show_tariffs(runtime, message)
                 return
             promo = await db.promo(code)
-            from app.service import promo_error
-
-            problem = promo_error(promo, int(months), int(user["telegram_id"]), utcnow())
+            problem = await promo_problem(db, promo, int(months), int(user["telegram_id"]), utcnow())
             if problem:
                 await message.answer(esc(problem))
                 return
@@ -433,9 +439,25 @@ def build_router(runtime: Runtime) -> Router:
             await db.disable_promo(args[1])
             await message.answer(f"Промокод {esc(args[1].upper())} выключен.")
             return
+        mode = args[0].lower()
+        if mode in {"общий", "общая", "общее", "общие"}:
+            shared = True
+        elif mode in {"личный", "личная", "личное", "личные"}:
+            shared = False
+        else:
+            await message.answer(
+                "Укажите тип.\n"
+                "/promo общий NEWYEAR 20% — для всех, каждый один раз\n"
+                "/promo личный GIFT 28490 — для одного человека"
+            )
+            return
+        args = args[1:]
+        if not args:
+            await message.answer("Формат: /promo общий NEWYEAR 20% или /promo личный GIFT 28490")
+            return
         code = args[0].upper()
         if not CODE.match(code) or len(args) < 2:
-            await message.answer("Формат: /promo КОД 20% 12 или /promo КОД 28490")
+            await message.answer("Формат: /promo общий NEWYEAR 20% или /promo личный GIFT 28490")
             return
         raw_value = args[1]
         months = None
@@ -459,14 +481,17 @@ def build_router(runtime: Runtime) -> Router:
                 kind = "final"
                 value = rub_to_kopecks(raw_value)
         except ValueError:
-            await message.answer("Формат: /promo КОД 20% 12 или /promo КОД 28490 12 30.11.2026")
+            await message.answer("Формат: /promo общий NEWYEAR 20% 12 30.11.2026")
             return
         try:
-            await db.create_promo(code, kind, value, months, expires)
+            await db.create_promo(code, kind, value, months, expires, shared)
         except Exception:
             await message.answer("Такой код уже есть.")
             return
-        await message.answer(f"Промокод {esc(code)} создан. Сработает один раз.")
+        if shared:
+            await message.answer(f"Общий промокод {esc(code)} создан. Каждый может оплатить им один раз.")
+        else:
+            await message.answer(f"Личный промокод {esc(code)} создан. Сработает у одного человека.")
 
     @router.message(Command("grant"))
     async def grant_cmd(message: Message, command: CommandObject) -> None:
