@@ -32,7 +32,7 @@ def build_app(runtime: Runtime, bot) -> web.Application:
         if not runtime.cfg.tbank_password:
             return web.Response(status=503, text="NO TERMINAL")
         try:
-            payload = await request.json(content_type=None)
+            payload = await request.json()
         except Exception:
             return web.Response(status=400, text="BAD JSON")
         if not isinstance(payload, dict) or not verify_notification(payload, runtime.cfg.tbank_password):

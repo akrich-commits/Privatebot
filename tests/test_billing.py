@@ -5,8 +5,12 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from aiohttp.test_utils import TestClient, TestServer
+
 from app.config import Config
 from app.db import Database
+from app.http import build_app
+from app.runtime import Runtime
 from app.pricing import add_months, apply_promo, current_price, utcnow
 from app.service import apply_note, confirm_payment, promo_error, start_checkout
 from app.tbank import BankNote, bank_ssl_context, make_token, verify_notification
@@ -137,6 +141,28 @@ class BillingTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bank.calls[0]["recurrent"])
         self.assertEqual(bank.calls[0]["email"], "nick@mail.ru")
 
+    async def test_demo_terminal_does_not_save_the_card(self):
+        user = await self.db.upsert_user(7, "nick", "Ник")
+        await self.db.set_email(7, "nick@mail.ru")
+        await self.db.set_pending(7, 1, None)
+        user = await self.db.user(7)
+        bank = FakeTBank()
+        demo = Config(
+            bot_token="",
+            admin_ids=frozenset({1}),
+            channel_id=-100123,
+            public_base_url="",
+            tbank_terminal_key="1793639084268DEMO",
+            tbank_password="secret",
+            taxation="usn_income",
+            port=8741,
+            db_path=":memory:",
+            save_card=False,
+        )
+        await start_checkout(self.db, bank, demo, user, "private_bot")
+        self.assertFalse(bank.calls[0]["recurrent"])
+        self.assertEqual(bank.calls[0]["operation_initiator"], "0")
+
     async def test_promo_is_one_time_and_locks_the_price(self):
         await self.db.upsert_user(7, "nick", "Ник")
         await self.db.create_promo("GIFT", "final", 2_849_000, 12, None)
@@ -211,6 +237,35 @@ class BillingTest(unittest.IsolatedAsyncioTestCase):
             BankNote("1m-7", "1", "CONFIRMED", True, 100, None, None),
         )
         self.assertIsNone(await self.db.subscription(7))
+
+
+class NotifyTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Database(str(Path(self.tmp.name) / "t.sqlite3"))
+        await self.db.connect()
+        self.cfg = cfg()
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        self.tmp.cleanup()
+
+    async def test_bank_notification_gets_plain_ok(self):
+        app = build_app(Runtime(cfg=self.cfg, db=self.db, tbank=None), bot=None)
+        payload = {
+            "TerminalKey": "TEST",
+            "OrderId": "missing",
+            "Success": True,
+            "Status": "CONFIRMED",
+            "PaymentId": "1",
+            "ErrorCode": "0",
+            "Amount": 399000,
+        }
+        payload["Token"] = make_token(payload, "secret")
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post("/tbank/notify", json=payload)
+            self.assertEqual(response.status, 200)
+            self.assertEqual(await response.text(), "OK")
 
 
 class SslTests(unittest.TestCase):

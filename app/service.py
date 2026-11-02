@@ -185,12 +185,15 @@ async def start_checkout(
         fail_url=fail,
     )
     try:
-        try:
-            result = await tbank.init_payment(**common, recurrent=True, operation_initiator="1")
-        except TBankError as exc:
-            if exc.code != "3013":
-                raise
-            log.warning("recurrent is disabled at the terminal, payment without saved card")
+        if cfg.save_card:
+            try:
+                result = await tbank.init_payment(**common, recurrent=True, operation_initiator="1")
+            except TBankError as exc:
+                if exc.code != "3013":
+                    raise
+                log.warning("recurrent is disabled at the terminal, payment without saved card")
+                result = await tbank.init_payment(**common, recurrent=False, operation_initiator="0")
+        else:
             result = await tbank.init_payment(**common, recurrent=False, operation_initiator="0")
     except Exception:
         await db.mark_payment(order_id, "failed")
