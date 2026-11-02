@@ -9,7 +9,7 @@ from app.config import Config
 from app.db import Database
 from app.pricing import add_months, apply_promo, current_price, utcnow
 from app.service import apply_note, confirm_payment, promo_error, start_checkout
-from app.tbank import BankNote, make_token, verify_notification
+from app.tbank import BankNote, bank_ssl_context, make_token, verify_notification
 
 
 class FakeBot:
@@ -211,6 +211,16 @@ class BillingTest(unittest.IsolatedAsyncioTestCase):
             BankNote("1m-7", "1", "CONFIRMED", True, 100, None, None),
         )
         self.assertIsNone(await self.db.subscription(7))
+
+
+class SslTests(unittest.TestCase):
+    def test_russian_trusted_root_is_loaded(self):
+        subjects = {
+            item.get("subject")[-1][0][1]
+            for item in bank_ssl_context().get_ca_certs()
+            if item.get("subject")
+        }
+        self.assertIn("Russian Trusted Root CA", subjects)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import ssl
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -11,6 +13,16 @@ from app.config import Config
 from app.pricing import LINK_TTL, MOSCOW, utcnow
 
 log = logging.getLogger("tbank")
+
+# T-Bank's certificate is issued by the Russian Trusted Root CA (Минцифры).
+# That root is absent from the default trust store on many servers.
+_EXTRA_CA = Path(__file__).resolve().parent.parent / "certs" / "russian_trusted_root_ca.pem"
+
+
+def bank_ssl_context() -> ssl.SSLContext:
+    ctx = ssl.create_default_context()
+    ctx.load_verify_locations(cafile=str(_EXTRA_CA))
+    return ctx
 
 
 class TBankError(RuntimeError):
@@ -75,12 +87,19 @@ class TBank:
 
     async def __aenter__(self) -> "TBank":
         if self._session is None:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30),
+                connector=aiohttp.TCPConnector(ssl=bank_ssl_context()),
+            )
         return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.close()
 
     async def close(self) -> None:
         if self._owns_session and self._session is not None:
             await self._session.close()
+            self._session = None
 
     async def _post(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
         body = {key: value for key, value in payload.items() if value is not None}
