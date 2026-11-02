@@ -378,12 +378,8 @@ def build_router(runtime: Runtime) -> Router:
             return
         if action == "export":
             await query.answer()
-            path = await db.ledger_csv()
             if query.message is not None:
-                await query.message.answer_document(
-                    FSInputFile(path),
-                    caption="Реестр: почта, ник, срок, сумма, период.",
-                )
+                await send_ledger(query.message, db)
             return
         await query.answer()
         if query.message is not None:
@@ -565,8 +561,7 @@ def build_router(runtime: Runtime) -> Router:
     async def export_cmd(message: Message) -> None:
         if message.from_user is None or not is_admin(runtime, message.from_user.id):
             return
-        path = await db.ledger_csv()
-        await message.answer_document(FSInputFile(path), caption="Реестр: почта, ник, срок, сумма, период.")
+        await send_ledger(message, db)
 
     @router.message(F.forward_origin | F.forward_from_chat)
     async def bind_channel(message: Message) -> None:
@@ -616,6 +611,14 @@ async def owner_runs_channel(bot: Bot, runtime: Runtime, chat_id: int, actor_id:
         log.exception("cannot read admins of %s", chat_id)
         return False
     return any(is_admin(runtime, member.user.id) for member in admins)
+
+
+async def send_ledger(message: Message, db: Database) -> None:
+    if await db.ledger_count() == 0:
+        await message.answer("Реестр пока пустой. Первая строка появится после оплаты или /grant.")
+        return
+    path = await db.ledger_csv()
+    await message.answer_document(FSInputFile(path), caption="Реестр: почта, ник, срок, сумма, период.")
 
 
 async def save_channel(runtime: Runtime, bot: Bot, chat_id: int, title: str, notify_id: int) -> None:

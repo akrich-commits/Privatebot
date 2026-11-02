@@ -561,6 +561,12 @@ class Database:
                 writer.writeheader()
             writer.writerow(row)
 
+    async def ledger_count(self) -> int:
+        async with self._lock:
+            cur = await self.db.execute("SELECT COUNT(*) AS n FROM ledger")
+            row = await cur.fetchone()
+        return int(row["n"])
+
     async def ledger_csv(self) -> str:
         path = Path(self.path).with_name("ledger.csv")
         if path.exists():
