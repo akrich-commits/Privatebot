@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,6 +11,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from app.config import Config
 from app.db import Database
 from app.http import build_app
+from app.main import Pulse
 from app.runtime import Runtime
 from app.pricing import add_months, apply_promo, current_price, utcnow
 from app.service import apply_note, confirm_payment, promo_error, promo_problem, start_checkout
@@ -284,6 +286,14 @@ class NotifyTests(unittest.IsolatedAsyncioTestCase):
             response = await client.post("/tbank/notify", json=payload)
             self.assertEqual(response.status, 200)
             self.assertEqual(await response.text(), "OK")
+
+
+class PulseTests(unittest.TestCase):
+    def test_stale_pulse_is_old_enough_to_restart(self):
+        pulse = Pulse()
+        self.assertLess(pulse.age(), 1)
+        pulse._at = time.monotonic() - 100
+        self.assertGreater(pulse.age(), 90)
 
 
 class SslTests(unittest.TestCase):

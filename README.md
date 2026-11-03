@@ -20,8 +20,10 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 cp .env.example .env
 .venv/bin/python -m unittest discover -s tests
-.venv/bin/python -m app
+./run.sh
 ```
+
+`run.sh` поднимает бота и сразу запускает его снова, если процесс остановился. Если Telegram не отвечает дольше полутора минут, бот завершается сам и скрипт стартует его заново.
 
 Пока в `.env` нет `BOT_TOKEN`, поднимается только служебный адрес `http://127.0.0.1:8741/health`.
 

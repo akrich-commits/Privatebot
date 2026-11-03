@@ -108,15 +108,24 @@ async def send_invite(bot, db: Database, cfg: Config, telegram_id: int, months: 
         return None
     if await member_of_channel(bot, channel, telegram_id):
         return None
-    expire = int((utcnow() + timedelta(days=7)).timestamp())
-    link = await bot.create_chat_invite_link(
-        channel,
-        name=f"Private {months}м {telegram_id}"[:32],
-        expire_date=expire,
-        member_limit=1,
-    )
-    url = link.invite_link
     sub = await db.subscription(telegram_id)
+    if sub and sub.get("invite_link"):
+        try:
+            await bot.revoke_chat_invite_link(channel, sub["invite_link"])
+        except Exception:
+            log.info("old invite revoke failed for %s", telegram_id)
+    expire = int((utcnow() + timedelta(days=7)).timestamp())
+    try:
+        link = await bot.create_chat_invite_link(
+            channel,
+            name=f"Private {months}м {telegram_id}"[:32],
+            expire_date=expire,
+            member_limit=1,
+        )
+    except Exception:
+        log.exception("invite link failed for %s", telegram_id)
+        return None
+    url = link.invite_link
     if sub:
         sub["invite_link"] = url
         await db.save_subscription(sub)
@@ -325,13 +334,22 @@ async def confirm_payment(db: Database, bot, cfg: Config, payment: dict) -> None
     link = await send_invite(bot, db, cfg, int(payment["telegram_id"]), int(payment["months"]))
     until = fmt_when(access_until)
     price = fmt_rub(int(payment["amount"]))
+    channel = await channel_id(db, cfg)
+    in_channel = channel is not None and await member_of_channel(
+        bot, channel, int(payment["telegram_id"])
+    )
     if link:
         text = (
             f"Оплата {price} прошла. Доступ до {until}.\n"
             f"Ссылка одноразовая, семь дней:\n{link}"
         )
+    elif in_channel:
+        text = f"Оплата {price} прошла. Вы уже в канале. Доступ до {until}."
     else:
-        text = f"Оплата {price} прошла. Доступ продлён до {until}."
+        text = (
+            f"Оплата {price} прошла. Доступ до {until}.\n"
+            "Ссылку в канал выпустить не удалось. Напишите боту ещё раз."
+        )
     if rebill:
         text += "\nДальше бот предупредит за двое суток и спишет ту же сумму."
     else:

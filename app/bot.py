@@ -7,7 +7,7 @@ from datetime import datetime
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, ChatMemberUpdated, FSInputFile, Message, MessageOriginChannel
+from aiogram.types import CallbackQuery, ChatMemberUpdated, ErrorEvent, FSInputFile, Message, MessageOriginChannel
 
 from app.db import Database
 from app.pricing import (
@@ -23,7 +23,16 @@ from app.pricing import (
 )
 from app.keyboards import admin_kb, confirm_kb, pay_kb, status_kb, tariffs_kb
 from app.runtime import Runtime
-from app.service import grant_access, promo_problem, quoted_price, start_checkout, sync_payment
+from app.service import (
+    channel_id,
+    grant_access,
+    member_of_channel,
+    promo_problem,
+    quoted_price,
+    send_invite,
+    start_checkout,
+    sync_payment,
+)
 from app.tbank import TBankError, parse_note
 
 log = logging.getLogger("bot")
@@ -212,10 +221,22 @@ def build_router(runtime: Runtime) -> Router:
             return
         renewal = "включено" if sub["autopay"] and sub.get("rebill_id") else "выключено"
         price = fmt_rub(int(sub["price_kopecks"])) if int(sub["price_kopecks"]) else "без оплаты"
-        await message.answer(
-            f"Доступ до {fmt_when(until)}.\n"
-            f"Тариф: {period_title(int(sub['months']))}, продление {price}.\n"
+        lines = [
+            f"Доступ до {fmt_when(until)}.",
+            f"Тариф: {period_title(int(sub['months']))}, продление {price}.",
             f"Автопродление {renewal}.",
+        ]
+        link = await send_invite(
+            message.bot, runtime.db, runtime.cfg, int(user["telegram_id"]), int(sub["months"])
+        )
+        channel = await channel_id(runtime.db, runtime.cfg)
+        inside = channel is not None and await member_of_channel(message.bot, channel, int(user["telegram_id"]))
+        if link:
+            lines.append(f"Ссылка в канал, одноразовая, семь дней:\n{link}")
+        elif not inside:
+            lines.append("Ссылку в канал сейчас выпустить не удалось. Напишите ещё раз.")
+        await message.answer(
+            "\n".join(lines),
             reply_markup=status_kb(bool(sub["autopay"] and sub.get("rebill_id"))),
         )
 
@@ -291,7 +312,17 @@ def build_router(runtime: Runtime) -> Router:
             await sync_payment(runtime.db, runtime.tbank, query.bot, runtime.cfg, payment)
             payment = await db.payment_by_order(payment["order_id"])
         if payment and payment["status"] == "confirmed":
-            await query.message.answer("Оплата уже проведена. Если ссылка потерялась, откройте /status.")
+            link = await send_invite(
+                query.bot, runtime.db, runtime.cfg, query.from_user.id, int(payment["months"])
+            )
+            channel = await channel_id(runtime.db, runtime.cfg)
+            inside = channel is not None and await member_of_channel(query.bot, channel, query.from_user.id)
+            if link:
+                await query.message.answer(f"Оплата проведена. Ссылка одноразовая, семь дней:\n{link}")
+            elif inside:
+                await query.message.answer("Оплата проведена, вы уже в канале.")
+            else:
+                await query.message.answer("Оплата проведена, но ссылку выпустить не удалось. Напишите ещё раз.")
             return
         await query.message.answer("Банк ещё не подтвердил оплату. Если деньги списались, нажмите ещё раз через минуту.")
 
@@ -618,6 +649,18 @@ def build_router(runtime: Runtime) -> Router:
         if user is None:
             return
         await show_tariffs(runtime, message)
+
+    @router.error()
+    async def on_error(event: ErrorEvent) -> None:
+        log.exception("update failed", exc_info=event.exception)
+        message = event.update.message
+        if message is None and event.update.callback_query is not None:
+            message = event.update.callback_query.message
+        if message is not None:
+            try:
+                await message.answer("Не вышло обработать сообщение. Нажмите /start.")
+            except Exception:
+                log.info("error reply was not delivered")
 
     @router.channel_post()
     async def remember_from_post(message: Message) -> None:

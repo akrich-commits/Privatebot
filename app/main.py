@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import threading
+import time
 
 from aiohttp import ClientTimeout, web
 from aiogram import Bot, Dispatcher
@@ -20,6 +23,30 @@ from app.runtime import Runtime
 from app.tbank import TBank
 
 log = logging.getLogger("private-bot")
+STALL_LIMIT = 90
+
+
+class Pulse:
+    def __init__(self) -> None:
+        self._at = time.monotonic()
+        self._lock = threading.Lock()
+
+    def mark(self) -> None:
+        with self._lock:
+            self._at = time.monotonic()
+
+    def age(self) -> float:
+        with self._lock:
+            return time.monotonic() - self._at
+
+
+def watch_pulse(pulse: Pulse, limit: float = STALL_LIMIT) -> None:
+    while True:
+        time.sleep(15)
+        age = pulse.age()
+        if age > limit:
+            log.error("telegram stalled for %.0fs, restarting", age)
+            os._exit(1)
 
 
 class LimitedSession(AiohttpSession):
@@ -30,6 +57,10 @@ class LimitedSession(AiohttpSession):
     connection never fails and the bot stays silent.
     """
 
+    def __init__(self, pulse: Pulse, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.pulse = pulse
+
     async def make_request(
         self,
         bot: Bot,
@@ -37,15 +68,19 @@ class LimitedSession(AiohttpSession):
         timeout: int | None = None,
     ) -> object:
         limit = float(self.timeout if timeout is None else timeout)
-        return await super().make_request(
+        result = await super().make_request(
             bot,
             method,
             timeout=ClientTimeout(total=limit, sock_connect=15, sock_read=limit),  # type: ignore[arg-type]
         )
+        self.pulse.mark()
+        return result
 
 
 async def run() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    pulse = Pulse()
+    threading.Thread(target=watch_pulse, args=(pulse,), name="telegram-pulse", daemon=True).start()
     cfg = Config.from_env()
     db = Database(cfg.db_path)
     await db.connect()
@@ -57,7 +92,7 @@ async def run() -> None:
     if cfg.bot_token:
         bot = Bot(
             cfg.bot_token,
-            session=LimitedSession(timeout=25),
+            session=LimitedSession(pulse, timeout=25),
             default=DefaultBotProperties(
                 parse_mode=ParseMode.HTML,
                 link_preview=LinkPreviewOptions(is_disabled=True),
