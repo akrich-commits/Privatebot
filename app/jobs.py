@@ -5,6 +5,7 @@ from datetime import timedelta
 
 from app.config import Config
 from app.db import Database
+from app.digest import scheduled_mail
 from app.pricing import WARN_BEFORE, fmt_rub, fmt_when, iso, parse_dt, period_title, utcnow
 from app.keyboards import warning_kb
 from app.service import charge_subscription, kick_subscription, sync_payment
@@ -61,3 +62,4 @@ async def tick(db: Database, tbank: TBank | None, bot, cfg: Config) -> None:
                 log.info("warning not delivered to %s", sub["telegram_id"])
     for sub in await db.due_removals(iso(now)):
         await kick_subscription(db, bot, cfg, sub)
+    await scheduled_mail(db, tbank, bot, cfg)

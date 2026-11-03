@@ -4,6 +4,7 @@ import logging
 
 from aiohttp import web
 
+from app.admin_web import register_admin
 from app.runtime import Runtime
 from app.service import apply_note
 from app.tbank import parse_note, verify_notification
@@ -47,4 +48,5 @@ def build_app(runtime: Runtime, bot) -> web.Application:
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
     app.router.add_post("/tbank/notify", notify)
+    register_admin(app)
     return app

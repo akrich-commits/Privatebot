@@ -39,6 +39,7 @@ class Config:
     taxation: str
     port: int
     db_path: str
+    admin_password: str = ""
     save_card: bool = True
     tbank_url: str = "https://securepay.tinkoff.ru/v2"
 
@@ -70,4 +71,5 @@ class Config:
             save_card=_save_card(terminal_key),
             port=int(os.environ.get("PORT", "8741")),
             db_path=os.environ.get("DB_PATH", "data/private.sqlite3"),
+            admin_password=os.environ.get("ADMIN_PASSWORD", "").strip(),
         )

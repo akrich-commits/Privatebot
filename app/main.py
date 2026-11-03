@@ -113,7 +113,7 @@ async def run() -> None:
             BotCommand(command="grant", description="Выдать доступ"),
             BotCommand(command="who", description="Карточка человека"),
             BotCommand(command="stats", description="Сводка"),
-            BotCommand(command="export", description="Реестр CSV"),
+            BotCommand(command="export", description="Реестр Excel"),
             BotCommand(command="refund", description="Возврат платежа"),
         ]
         await bot.set_my_commands(public_commands, scope=BotCommandScopeDefault())

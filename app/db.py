@@ -654,6 +654,11 @@ class Database:
                 writer.writeheader()
             writer.writerow(row)
 
+    async def ledger_rows(self) -> list[dict]:
+        async with self._lock:
+            cur = await self.db.execute("SELECT * FROM ledger ORDER BY id")
+            return [dict(row) for row in await cur.fetchall()]
+
     async def ledger_count(self) -> int:
         async with self._lock:
             cur = await self.db.execute("SELECT COUNT(*) AS n FROM ledger")

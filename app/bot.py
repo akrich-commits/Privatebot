@@ -4,6 +4,7 @@ import html
 import logging
 import re
 from datetime import datetime
+from pathlib import Path
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
@@ -23,6 +24,7 @@ from app.pricing import (
 )
 from app.keyboards import admin_kb, confirm_kb, pay_kb, status_kb, tariffs_kb
 from app.runtime import Runtime
+from app.sheets import write_ledger
 from app.service import (
     channel_id,
     grant_access,
@@ -175,14 +177,17 @@ async def promos_text(db: Database) -> str:
 ADMIN_HELP = (
     "<b>Админка</b>\n"
     "Кнопки ниже открывают цены, промокоды, сводку и реестр. "
-    "Менять цифры нужно командой.\n\n"
+    "Менять цифры можно командой или на сайте: кнопка «Промокоды на сайте». "
+    "Сайт и бот смотрят одну базу, поэтому код начинает работать сразу, и вам приходит сообщение.\n\n"
     "/price — цены и акции\n"
     "/promo — общий код для всех или личный для одного человека\n"
     "/grant 123456789 12 — выдать срок без оплаты\n"
     "/who 123456789 — карточка человека, можно и @ник\n"
     "/stats — сколько доступов и какая сумма в реестре\n"
-    "/export — файл реестра\n"
-    "/refund id — вернуть платёж, когда будет подключён Т-Банк\n\n"
+    "/export — реестр Excel, суммы в рублях\n"
+    "/refund id — вернуть платёж\n\n"
+    "Самодиагностика приходит в 0:00, 6:00, 12:00 и 18:00 мск. "
+    "Сводка и реестр — в 10:00 и 19:00 мск.\n"
     "Канал запоминается сам, когда вы назначаете бота администратором Private."
 )
 
@@ -190,6 +195,10 @@ ADMIN_HELP = (
 def build_router(runtime: Runtime) -> Router:
     router = Router()
     db: Database = runtime.db
+
+    def panel():
+        base = runtime.cfg.public_base_url
+        return admin_kb(f"{base}/admin" if base else None)
 
     @router.message(CommandStart())
     async def start(message: Message, command: CommandObject) -> None:
@@ -387,7 +396,7 @@ def build_router(runtime: Runtime) -> Router:
         user = await touch(runtime, message)
         if user is None or not is_admin(runtime, message.from_user.id if message.from_user else None):
             return
-        await message.answer(ADMIN_HELP, reply_markup=admin_kb())
+        await message.answer(ADMIN_HELP, reply_markup=panel())
 
     @router.callback_query(F.data.startswith("admin:"))
     async def admin_panel(query: CallbackQuery) -> None:
@@ -398,12 +407,12 @@ def build_router(runtime: Runtime) -> Router:
         if action == "prices":
             await query.answer()
             if query.message is not None:
-                await query.message.answer(await prices_text(db), reply_markup=admin_kb())
+                await query.message.answer(await prices_text(db), reply_markup=panel())
             return
         if action == "promos":
             await query.answer()
             if query.message is not None:
-                await query.message.answer(await promos_text(db), reply_markup=admin_kb())
+                await query.message.answer(await promos_text(db), reply_markup=panel())
             return
         if action == "stats":
             await query.answer()
@@ -412,17 +421,17 @@ def build_router(runtime: Runtime) -> Router:
                 await query.message.answer(
                     f"Активных доступов: {stats['active']}\n"
                     f"Сумма реестра без возвратов: {fmt_rub(int(stats['paid']))}",
-                    reply_markup=admin_kb(),
+                    reply_markup=panel(),
                 )
             return
         if action == "export":
             await query.answer()
             if query.message is not None:
-                await send_ledger(query.message, db)
+                await send_ledger(query.message, runtime)
             return
         await query.answer()
         if query.message is not None:
-            await query.message.answer(ADMIN_HELP, reply_markup=admin_kb())
+            await query.message.answer(ADMIN_HELP, reply_markup=panel())
 
     @router.message(Command("price"))
     async def price_cmd(message: Message, command: CommandObject) -> None:
@@ -430,7 +439,7 @@ def build_router(runtime: Runtime) -> Router:
             return
         args = (command.args or "").split()
         if not args:
-            await message.answer(await prices_text(db), reply_markup=admin_kb())
+            await message.answer(await prices_text(db), reply_markup=panel())
             return
         try:
             months = int(args[0])
@@ -466,7 +475,7 @@ def build_router(runtime: Runtime) -> Router:
             return
         args = (command.args or "").split()
         if not args:
-            await message.answer(await promos_text(db), reply_markup=admin_kb())
+            await message.answer(await promos_text(db), reply_markup=panel())
             return
         if args[0].lower() == "off" and len(args) == 2:
             await db.disable_promo(args[1])
@@ -619,7 +628,7 @@ def build_router(runtime: Runtime) -> Router:
     async def export_cmd(message: Message) -> None:
         if message.from_user is None or not is_admin(runtime, message.from_user.id):
             return
-        await send_ledger(message, db)
+        await send_ledger(message, runtime)
 
     @router.message(F.forward_origin | F.forward_from_chat)
     async def bind_channel(message: Message) -> None:
@@ -690,12 +699,19 @@ async def owner_runs_channel(bot: Bot, runtime: Runtime, chat_id: int, actor_id:
     return any(is_admin(runtime, member.user.id) for member in admins)
 
 
-async def send_ledger(message: Message, db: Database) -> None:
+async def send_ledger(message: Message, runtime: Runtime) -> None:
+    db = runtime.db
     if await db.ledger_count() == 0:
         await message.answer("Реестр пока пустой. Первая строка появится после оплаты или /grant.")
         return
-    path = await db.ledger_csv()
-    await message.answer_document(FSInputFile(path), caption="Реестр: почта, ник, срок, сумма, период.")
+    rows = await db.ledger_rows()
+    stats = await db.stats()
+    path = Path(runtime.cfg.db_path).with_name("ledger.xlsx")
+    write_ledger(path, rows, int(stats["active"]))
+    await message.answer_document(
+        FSInputFile(path, filename="reestr-private.xlsx"),
+        caption="Реестр Excel: почта, ник, срок, сумма в рублях, период.",
+    )
 
 
 async def save_channel(runtime: Runtime, bot: Bot, chat_id: int, title: str, notify_id: int) -> None:
