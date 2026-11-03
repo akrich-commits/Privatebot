@@ -348,6 +348,8 @@ def build_router(runtime: Runtime) -> Router:
             await db.set_awaiting(int(user["telegram_id"]), None)
             user["pending_promo"] = code
             await show_confirm(runtime, message, user)
+            return
+        await show_tariffs(runtime, message)
 
     @router.message(Command("admin"))
     async def admin_help(message: Message) -> None:
@@ -609,6 +611,13 @@ def build_router(runtime: Runtime) -> Router:
             return
         notify = event.from_user.id if is_admin(runtime, event.from_user.id) else next(iter(runtime.cfg.admin_ids))
         await save_channel(runtime, event.bot, event.chat.id, event.chat.title or "", notify)
+
+    @router.message()
+    async def fallback(message: Message) -> None:
+        user = await touch(runtime, message)
+        if user is None:
+            return
+        await show_tariffs(runtime, message)
 
     @router.channel_post()
     async def remember_from_post(message: Message) -> None:
