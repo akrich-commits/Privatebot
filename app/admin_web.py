@@ -70,6 +70,8 @@ PAGE = """<!DOCTYPE html>
   @media (min-width: 700px) {{ .row.two {{ grid-template-columns: 1fr 1fr; }} }}
   button, .link {{ display: inline-block; margin-top: 14px; background: var(--ink); color: #fff; border: 0; border-radius: 999px; padding: 10px 16px; text-decoration: none; cursor: pointer; }}
   button.quiet {{ background: transparent; color: var(--accent); padding: 0; margin: 0; }}
+  form.inline {{ background: none; border: 0; padding: 0; margin: 0; display: inline; }}
+  .actions {{ display: flex; gap: 14px; align-items: center; flex-shrink: 0; }}
   .note {{ background: #f3ece4; border-radius: 12px; padding: 12px 14px; margin: 0 0 16px; }}
   .error {{ color: var(--accent); }}
   ul {{ list-style: none; padding: 0; margin: 0; }}
@@ -112,7 +114,14 @@ def passwords_match(given: str, expected: str) -> bool:
     )
 
 
-def _back(path: str = "/admin/promos", *, error: str = "", saved: str = "", off: str = "") -> web.HTTPFound:
+def _back(
+    path: str = "/admin/promos",
+    *,
+    error: str = "",
+    saved: str = "",
+    off: str = "",
+    deleted: str = "",
+) -> web.HTTPFound:
     query = {}
     if error:
         query["error"] = error
@@ -120,6 +129,8 @@ def _back(path: str = "/admin/promos", *, error: str = "", saved: str = "", off:
         query["saved"] = saved
     if off:
         query["off"] = off
+    if deleted:
+        query["deleted"] = deleted
     return web.HTTPFound(str(URL(path).with_query(query)))
 
 
@@ -183,12 +194,14 @@ def _access(row: dict, now: datetime) -> str:
     return html.escape(str(status))
 
 
-def _notes(error: str = "", saved: str = "", off: str = "") -> str:
+def _notes(error: str = "", saved: str = "", off: str = "", deleted: str = "") -> str:
     chunks = []
     if saved:
         chunks.append(f'<p class="note">Код {html.escape(saved)} сохранён. Бот уже может его принять.</p>')
     if off:
         chunks.append(f'<p class="note">Код {html.escape(off)} выключен. Бот его больше не примет.</p>')
+    if deleted:
+        chunks.append(f'<p class="note">Код {html.escape(deleted)} удалён. Его можно завести заново.</p>')
     if error:
         chunks.append(f'<p class="error">{html.escape(error)}</p>')
     return "".join(chunks)
@@ -212,6 +225,27 @@ def _promo_line(promo: dict, counts: dict[str, int]) -> str:
     return f"<code>{html.escape(promo['code'])}</code> — {html.escape(value)}, {html.escape(scope)}, {audience}, {html.escape(state)}{html.escape(until)}"
 
 
+def _promo_actions(code: str, token: str, *, can_disable: bool) -> str:
+    hidden = (
+        f'<input type="hidden" name="csrf" value="{html.escape(token)}">'
+        f'<input type="hidden" name="code" value="{html.escape(code)}">'
+    )
+    disable = ""
+    if can_disable:
+        disable = (
+            '<form class="inline" method="post" action="/admin/promos/off">'
+            + hidden
+            + '<button class="quiet" type="submit">Выключить</button></form>'
+        )
+    delete = (
+        '<form class="inline" method="post" action="/admin/promos/delete" '
+        'onsubmit="return confirm(\'Удалить код? Его можно будет завести заново.\')">'
+        + hidden
+        + '<button class="quiet" type="submit">Удалить</button></form>'
+    )
+    return f'<span class="actions">{disable}{delete}</span>'
+
+
 def _panel(
     promos: list[dict],
     counts: dict[str, int],
@@ -219,28 +253,25 @@ def _panel(
     error: str,
     saved: str,
     off: str,
+    deleted: str = "",
 ) -> str:
     items = []
     for promo in promos:
         line = _promo_line(promo, counts)
-        if promo["disabled"] or promo["used_by"]:
-            items.append(f"<li><span>{line}</span></li>")
-            continue
+        can_disable = not promo["disabled"] and not promo["used_by"]
         items.append(
             "<li><span>"
             + line
             + "</span>"
-            + '<form method="post" action="/admin/promos/off">'
-            + f'<input type="hidden" name="csrf" value="{html.escape(token)}">'
-            + f'<input type="hidden" name="code" value="{html.escape(promo["code"])}">'
-            + '<button class="quiet" type="submit">Выключить</button></form></li>'
+            + _promo_actions(promo["code"], token, can_disable=can_disable)
+            + "</li>"
         )
     listing = "<ul>" + "".join(items) + "</ul>" if items else '<p class="muted">Кодов пока нет.</p>'
     return (
         "<h1>Промокоды</h1>"
         + _nav("promos")
-        + '<p class="muted">Код, сохранённый здесь, бот принимает сразу.</p>'
-        + _notes(error, saved, off)
+        + '<p class="muted">Код, сохранённый здесь, бот принимает сразу. Удаление стирает код и тех, кто его уже использовал, поэтому те же буквы можно выдать снова.</p>'
+        + _notes(error, saved, off, deleted)
         + "<h2>Новый промокод</h2>"
         + '<form method="post" action="/admin/promos">'
         + f'<input type="hidden" name="csrf" value="{html.escape(token)}">'
@@ -279,6 +310,7 @@ def register_admin(app: web.Application) -> None:
     app.router.add_post("/admin/login", login)
     app.router.add_post("/admin/promos", create_promo)
     app.router.add_post("/admin/promos/off", disable_promo)
+    app.router.add_post("/admin/promos/delete", delete_promo_page)
     app.router.add_get("/admin/reestr.xlsx", download_ledger)
 
 
@@ -535,6 +567,7 @@ async def promos_page(request: web.Request) -> web.Response:
             request.query.get("error", ""),
             request.query.get("saved", ""),
             request.query.get("off", ""),
+            request.query.get("deleted", ""),
         )
     )
 
@@ -646,6 +679,28 @@ async def disable_promo(request: web.Request) -> web.Response:
         f"На сайте выключен промокод <code>{html.escape(code)}</code>.",
     )
     raise _back(off=code)
+
+
+async def delete_promo_page(request: web.Request) -> web.Response:
+    denied = _guard(request)
+    if denied is not None:
+        return denied
+    runtime = _runtime(request)
+    form = await request.post()
+    if not token_ok(runtime, str(form.get("csrf") or "")) or str(form.get("csrf") or "") != _cookie_token(request):
+        return _page(_login("Сессия устарела. Войдите ещё раз."))
+    code = str(form.get("code") or "").strip().upper()
+    if not CODE.match(code):
+        raise _back(error="Нет такого кода.")
+    removed = await runtime.db.delete_promo(code)
+    if not removed:
+        raise _back(error="Нет такого кода.")
+    await tell_admins(
+        request.app["bot"],
+        runtime.cfg,
+        f"На сайте удалён промокод <code>{html.escape(code)}</code>. Его можно завести заново.",
+    )
+    raise _back(deleted=code)
 
 
 async def download_ledger(request: web.Request) -> web.Response:

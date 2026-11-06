@@ -190,6 +190,7 @@ async def promos_text(db: Database) -> str:
     lines.append("/promo общий NEWYEAR 20% 12 30.11.2026 — только 12 месяцев, до конца дня")
     lines.append("/promo личный GIFT 28490 — для одного человека")
     lines.append("/promo off NEWYEAR — выключить")
+    lines.append("/promo del NEWYEAR — удалить, потом код можно завести снова")
     return "\n".join(lines)
 
 
@@ -502,6 +503,13 @@ def build_router(runtime: Runtime) -> Router:
         if args[0].lower() == "off" and len(args) == 2:
             await db.disable_promo(args[1])
             await message.answer(f"Промокод {esc(args[1].upper())} выключен.")
+            return
+        if args[0].lower() in {"del", "delete", "удалить"} and len(args) == 2:
+            removed = await db.delete_promo(args[1])
+            if not removed:
+                await message.answer("Нет такого кода.")
+                return
+            await message.answer(f"Промокод {esc(args[1].upper())} удалён. Этот код можно завести снова.")
             return
         mode = args[0].lower()
         if mode in {"общий", "общая", "общее", "общие"}:

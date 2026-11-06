@@ -280,6 +280,14 @@ class Database:
             await self.db.execute("UPDATE promos SET disabled = 1 WHERE code = ?", (code.upper(),))
             await self.db.commit()
 
+    async def delete_promo(self, code: str) -> bool:
+        code = code.upper()
+        async with self._lock:
+            await self.db.execute("DELETE FROM promo_redemptions WHERE code = ?", (code,))
+            cur = await self.db.execute("DELETE FROM promos WHERE code = ?", (code,))
+            await self.db.commit()
+            return cur.rowcount == 1
+
     async def reserve_promo(self, code: str, telegram_id: int, order_id: str, until: str, now: str) -> bool:
         async with self._lock:
             cur = await self.db.execute(

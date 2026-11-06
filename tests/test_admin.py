@@ -219,9 +219,32 @@ class AdminSiteTest(unittest.IsolatedAsyncioTestCase):
                 data={"csrf": csrf.group(1), "code": "SITE20"},
             )
             self.assertIn("выключен", await closed.text())
+            await self.db.consume_shared_promo("SITE20", 7, "order-1", "2026-11-03T07:00:00+00:00")
+            self.assertTrue(await self.db.shared_promo_used("SITE20", 7))
+            removed = await client.post(
+                "/admin/promos/delete",
+                data={"csrf": csrf.group(1), "code": "SITE20"},
+            )
+            self.assertIn("удалён", await removed.text())
+            self.assertIsNone(await self.db.promo("SITE20"))
+            self.assertFalse(await self.db.shared_promo_used("SITE20", 7))
+            again_new = await client.post(
+                "/admin/promos",
+                data={
+                    "csrf": csrf.group(1),
+                    "code": "SITE20",
+                    "audience": "shared",
+                    "mode": "percent",
+                    "value": "15",
+                    "months": "",
+                    "expires": "",
+                },
+            )
+            self.assertIn("сохранён", await again_new.text())
         promo = await self.db.promo("SITE20")
-        self.assertEqual(promo["disabled"], 1)
-        self.assertGreaterEqual(len(self.bot.messages), 2)
+        self.assertEqual(promo["disabled"], 0)
+        self.assertEqual(promo["value"], 15)
+        self.assertGreaterEqual(len(self.bot.messages), 3)
 
     async def test_clients_show_term_price_and_payment(self):
         await self.db.upsert_user(7, "nick", "Ник")
