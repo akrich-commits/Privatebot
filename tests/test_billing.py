@@ -14,6 +14,7 @@ from app.http import build_app
 from app.main import Pulse
 from app.runtime import Runtime
 from app.pricing import add_months, apply_promo, current_price, utcnow
+from app.bot import open_plan, start_plan
 from app.service import apply_note, confirm_payment, promo_error, promo_problem, start_checkout
 from app.tbank import BankNote, bank_ssl_context, make_token, verify_notification
 
@@ -286,6 +287,53 @@ class NotifyTests(unittest.IsolatedAsyncioTestCase):
             response = await client.post("/tbank/notify", json=payload)
             self.assertEqual(response.status, 200)
             self.assertEqual(await response.text(), "OK")
+
+
+class Talk:
+    def __init__(self):
+        self.texts: list[str] = []
+
+    async def answer(self, text, reply_markup=None):
+        self.texts.append(text)
+
+
+class SiteLinkTest(unittest.IsolatedAsyncioTestCase):
+    def test_start_payload_picks_a_term(self):
+        self.assertEqual(start_plan("12"), 12)
+        self.assertEqual(start_plan("1"), 1)
+        self.assertIsNone(start_plan("paid"))
+        self.assertIsNone(start_plan("2"))
+        self.assertIsNone(start_plan(None))
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Database(str(Path(self.tmp.name) / "t.sqlite3"))
+        await self.db.connect()
+        self.runtime = Runtime(cfg=cfg(), db=self.db, tbank=None)
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        self.tmp.cleanup()
+
+    async def test_link_without_email_asks_for_the_receipt_address(self):
+        user = await self.db.upsert_user(7, "nick", "Ник")
+        talk = Talk()
+        await open_plan(self.runtime, talk, user, 12)
+        self.assertEqual(talk.texts, ["Напишите почту для чека. Телефон не нужен."])
+        saved = await self.db.user(7)
+        self.assertEqual(saved["pending_months"], 12)
+        self.assertEqual(saved["awaiting"], "email")
+
+    async def test_link_with_email_opens_that_term(self):
+        await self.db.upsert_user(7, "nick", "Ник")
+        await self.db.set_email(7, "nick@mail.ru")
+        user = await self.db.user(7)
+        talk = Talk()
+        await open_plan(self.runtime, talk, user, 6)
+        self.assertIn("6 месяцев", talk.texts[0])
+        saved = await self.db.user(7)
+        self.assertEqual(saved["pending_months"], 6)
+        self.assertIsNone(saved["awaiting"])
 
 
 class PulseTests(unittest.TestCase):

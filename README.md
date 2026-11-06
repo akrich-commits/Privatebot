@@ -58,3 +58,11 @@ cp .env.example .env
 Самодиагностика приходит в Telegram в 0:00, 6:00, 12:00 и 18:00 мск. Сводка и файл реестра — в 10:00 и 19:00 мск. Пароль сайта задаётся в `ADMIN_PASSWORD`.
 
 Канал запоминается сам, когда владелец назначает бота администратором. Пересылка поста из канала тоже подходит.
+
+Кнопки тарифов на сайте могут открывать бота сразу на выбранном сроке:
+
+- 1 месяц — `https://t.me/economism_private_bot?start=1`
+- 3 месяца — `https://t.me/economism_private_bot?start=3`
+- 6 месяцев — `https://t.me/economism_private_bot?start=6`
+- 12 месяцев — `https://t.me/economism_private_bot?start=12`
+- срок ещё не выбран — `https://t.me/economism_private_bot`

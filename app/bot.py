@@ -50,6 +50,25 @@ def is_admin(runtime: Runtime, user_id: int | None) -> bool:
     return user_id is not None and user_id in runtime.cfg.admin_ids
 
 
+def start_plan(args: str | None) -> int | None:
+    token = (args or "").strip()
+    if token in {"1", "3", "6", "12"}:
+        return int(token)
+    return None
+
+
+async def open_plan(runtime: Runtime, message: Message, user: dict, months: int) -> None:
+    await runtime.db.set_pending(int(user["telegram_id"]), months, None)
+    user["pending_months"] = months
+    user["pending_promo"] = None
+    if not user.get("email"):
+        await runtime.db.set_awaiting(int(user["telegram_id"]), "email")
+        await message.answer("Напишите почту для чека. Телефон не нужен.")
+        return
+    await runtime.db.set_awaiting(int(user["telegram_id"]), None)
+    await show_confirm(runtime, message, user)
+
+
 async def touch(runtime: Runtime, message: Message) -> dict | None:
     if message.chat.type != "private" or message.from_user is None:
         return None
@@ -207,8 +226,16 @@ def build_router(runtime: Runtime) -> Router:
             return
         if command.args == "paid":
             await message.answer("Платёж проверяю. Если ссылка на канал не пришла, нажмите «Я оплатил».")
-        elif command.args == "fail":
+            await show_tariffs(runtime, message)
+            return
+        if command.args == "fail":
             await message.answer("Оплата не прошла. Можно выбрать срок ещё раз.")
+            await show_tariffs(runtime, message)
+            return
+        months = start_plan(command.args)
+        if months is not None and await db.plan(months) is not None:
+            await open_plan(runtime, message, user, months)
+            return
         await show_tariffs(runtime, message)
 
     @router.message(Command("id"))
@@ -271,15 +298,10 @@ def build_router(runtime: Runtime) -> Router:
         await query.answer()
         user = await db.upsert_user(query.from_user.id, query.from_user.username, query.from_user.first_name)
         months = int((query.data or "").split(":", 1)[1])
-        await db.set_pending(query.from_user.id, months, None)
-        user["pending_months"] = months
-        user["pending_promo"] = None
-        if not user.get("email"):
-            await db.set_awaiting(query.from_user.id, "email")
-            await query.message.answer("Напишите почту для чека. Телефон не нужен.")
+        if await db.plan(months) is None:
+            await show_tariffs(runtime, query)
             return
-        await db.set_awaiting(query.from_user.id, None)
-        await show_confirm(runtime, query.message, user)
+        await open_plan(runtime, query.message, user, months)
 
     @router.callback_query(F.data == "promo:ask")
     async def ask_promo(query: CallbackQuery) -> None:
