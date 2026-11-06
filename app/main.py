@@ -5,6 +5,7 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 
 from aiohttp import ClientTimeout, web
 from aiogram import Bot, Dispatcher
@@ -27,7 +28,8 @@ STALL_LIMIT = 90
 
 
 class Pulse:
-    def __init__(self) -> None:
+    def __init__(self, path: str | None = None) -> None:
+        self.path = path
         self._at = time.monotonic()
         self._lock = threading.Lock()
 
@@ -39,10 +41,18 @@ class Pulse:
         with self._lock:
             return time.monotonic() - self._at
 
+    def beat(self) -> None:
+        if not self.path:
+            return
+        path = Path(self.path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{time.time()}\n", encoding="utf-8")
+
 
 def watch_pulse(pulse: Pulse, limit: float = STALL_LIMIT) -> None:
     while True:
         time.sleep(15)
+        pulse.beat()
         age = pulse.age()
         if age > limit:
             log.error("telegram stalled for %.0fs, restarting", age)
@@ -74,14 +84,16 @@ class LimitedSession(AiohttpSession):
             timeout=ClientTimeout(total=limit, sock_connect=15, sock_read=limit),  # type: ignore[arg-type]
         )
         self.pulse.mark()
+        self.pulse.beat()
         return result
 
 
 async def run() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    pulse = Pulse()
-    threading.Thread(target=watch_pulse, args=(pulse,), name="telegram-pulse", daemon=True).start()
     cfg = Config.from_env()
+    pulse = Pulse(str(Path(cfg.db_path).with_name("heartbeat")))
+    pulse.beat()
+    threading.Thread(target=watch_pulse, args=(pulse,), name="telegram-pulse", daemon=True).start()
     db = Database(cfg.db_path)
     await db.connect()
     tbank = TBank(cfg) if cfg.tbank_ready else None

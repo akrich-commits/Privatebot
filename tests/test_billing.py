@@ -343,6 +343,18 @@ class PulseTests(unittest.TestCase):
         pulse._at = time.monotonic() - 100
         self.assertGreater(pulse.age(), 90)
 
+    def test_heartbeat_file_is_rewritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "heartbeat"
+            pulse = Pulse(str(path))
+            pulse.beat()
+            first = path.read_text(encoding="utf-8")
+            time.sleep(0.01)
+            pulse.mark()
+            pulse.beat()
+            second = path.read_text(encoding="utf-8")
+        self.assertNotEqual(first, second)
+
 
 class SslTests(unittest.TestCase):
     def test_russian_trusted_root_is_loaded(self):
