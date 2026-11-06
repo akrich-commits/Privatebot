@@ -5,13 +5,14 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from aiohttp.test_utils import TestClient, TestServer
 
 from app.config import Config
 from app.db import Database
 from app.http import build_app
-from app.main import Pulse
+from app.main import Pulse, keeps_bot_alive, supervisor_action, telegram_timeout
 from app.runtime import Runtime
 from app.pricing import add_months, apply_promo, current_price, utcnow
 from app.bot import open_plan, start_plan
@@ -354,6 +355,23 @@ class PulseTests(unittest.TestCase):
             pulse.beat()
             second = path.read_text(encoding="utf-8")
         self.assertNotEqual(first, second)
+
+    def test_only_update_polling_keeps_the_bot_alive(self):
+        self.assertTrue(keeps_bot_alive(SimpleNamespace(__api_method__="getUpdates")))
+        self.assertFalse(keeps_bot_alive(SimpleNamespace(__api_method__="sendMessage")))
+
+    def test_stale_polling_asks_for_exit(self):
+        self.assertEqual(supervisor_action(10, 90, armed=True), "beat")
+        self.assertEqual(supervisor_action(91, 90, armed=True), "exit")
+        self.assertEqual(supervisor_action(1000, 90, armed=False), "beat")
+
+    def test_telegram_read_timeout_is_capped(self):
+        capped = telegram_timeout(3600)
+        self.assertEqual(capped.total, 60)
+        self.assertEqual(capped.sock_read, 60)
+        polling = telegram_timeout(35)
+        self.assertEqual(polling.sock_read, 35)
+        self.assertIsNotNone(polling.sock_connect)
 
 
 class SslTests(unittest.TestCase):

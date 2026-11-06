@@ -8,7 +8,7 @@ while true; do
   pid=$!
   started=$(date +%s)
   while kill -0 "$pid" 2>/dev/null; do
-    sleep 30
+    sleep 15
     now=$(date +%s)
     if [ -f "$heart" ]; then
       stamp=$(stat -c %Y "$heart")
@@ -18,6 +18,8 @@ while true; do
     fi
     if [ "$age" -gt "$limit" ]; then
       echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) no heartbeat for ${age}s, killing $pid"
+      mkdir -p data
+      echo stall > data/restart-reason
       kill -9 "$pid" 2>/dev/null
       break
     fi

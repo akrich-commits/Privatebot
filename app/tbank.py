@@ -88,7 +88,7 @@ class TBank:
     async def __aenter__(self) -> "TBank":
         if self._session is None:
             self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=30),
+                timeout=aiohttp.ClientTimeout(total=30, sock_connect=15, sock_read=30),
                 connector=aiohttp.TCPConnector(ssl=bank_ssl_context()),
             )
         return self

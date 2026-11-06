@@ -18,6 +18,7 @@ from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefaul
 from app.bot import build_router
 from app.config import Config
 from app.db import Database
+from app.digest import tell_admins
 from app.http import build_app
 from app.jobs import tick
 from app.runtime import Runtime
@@ -25,6 +26,33 @@ from app.tbank import TBank
 
 log = logging.getLogger("private-bot")
 STALL_LIMIT = 90
+READ_CAP = 60
+
+
+def telegram_timeout(seconds: float) -> ClientTimeout:
+    """Bound both the whole call and any silent read.
+
+    A numeric aiohttp timeout limits only the total and leaves sock_read empty.
+    Telegram can send response headers and then keep the body open, so a long
+    poll without a read limit never fails.
+    """
+    limit = min(max(float(seconds), 1.0), READ_CAP)
+    return ClientTimeout(total=limit, sock_connect=15, sock_read=limit)
+
+
+def keeps_bot_alive(method: object) -> bool:
+    """Only a completed getUpdates proves the bot is still receiving people.
+
+    Sending a warning or a diagnostic uses the same session. Those calls must
+    not refresh the stall clock: otherwise a stuck long poll looks healthy.
+    """
+    return getattr(method, "__api_method__", "") == "getUpdates"
+
+
+def supervisor_action(age: float, limit: float, armed: bool) -> str:
+    if armed and age > limit:
+        return "exit"
+    return "beat"
 
 
 class Pulse:
@@ -48,24 +76,27 @@ class Pulse:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"{time.time()}\n", encoding="utf-8")
 
+    def write_reason(self, reason: str) -> None:
+        if not self.path:
+            return
+        path = Path(self.path).with_name("restart-reason")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(reason + "\n", encoding="utf-8")
 
-def watch_pulse(pulse: Pulse, limit: float = STALL_LIMIT) -> None:
+
+def watch_pulse(pulse: Pulse, limit: float = STALL_LIMIT, armed: bool = True) -> None:
     while True:
         time.sleep(15)
-        pulse.beat()
         age = pulse.age()
-        if age > limit:
-            log.error("telegram stalled for %.0fs, restarting", age)
+        if supervisor_action(age, limit, armed) == "exit":
+            log.error("telegram polling stalled for %.0fs, restarting", age)
+            pulse.write_reason("stall")
             os._exit(1)
+        pulse.beat()
 
 
 class LimitedSession(AiohttpSession):
-    """Drop a stalled Telegram connection instead of waiting indefinitely.
-
-    A long poll can receive response headers and then hold the body. aiohttp
-    treats a numeric timeout as a total only, with no read limit, so a dead
-    connection never fails and the bot stays silent.
-    """
+    """Drop a stalled Telegram connection instead of waiting indefinitely."""
 
     def __init__(self, pulse: Pulse, **kwargs: object) -> None:
         super().__init__(**kwargs)  # type: ignore[arg-type]
@@ -81,10 +112,11 @@ class LimitedSession(AiohttpSession):
         result = await super().make_request(
             bot,
             method,
-            timeout=ClientTimeout(total=limit, sock_connect=15, sock_read=limit),  # type: ignore[arg-type]
+            timeout=telegram_timeout(limit),  # type: ignore[arg-type]
         )
-        self.pulse.mark()
-        self.pulse.beat()
+        if keeps_bot_alive(method):
+            self.pulse.mark()
+            self.pulse.beat()
         return result
 
 
@@ -93,7 +125,12 @@ async def run() -> None:
     cfg = Config.from_env()
     pulse = Pulse(str(Path(cfg.db_path).with_name("heartbeat")))
     pulse.beat()
-    threading.Thread(target=watch_pulse, args=(pulse,), name="telegram-pulse", daemon=True).start()
+    threading.Thread(
+        target=watch_pulse,
+        kwargs={"pulse": pulse, "armed": bool(cfg.bot_token)},
+        name="telegram-pulse",
+        daemon=True,
+    ).start()
     db = Database(cfg.db_path)
     await db.connect()
     tbank = TBank(cfg) if cfg.tbank_ready else None
@@ -134,6 +171,15 @@ async def run() -> None:
                 await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
             except Exception:
                 log.exception("admin commands were not set for %s", admin_id)
+        reason_path = Path(cfg.db_path).with_name("restart-reason")
+        if reason_path.is_file() and reason_path.read_text(encoding="utf-8").strip() == "stall":
+            sent = await tell_admins(
+                bot,
+                cfg,
+                "Бот завис и только что перезапустился сам. Сообщения за это время сейчас догонит.",
+            )
+            if sent:
+                reason_path.unlink(missing_ok=True)
     app = build_app(runtime, bot)
     runner = web.AppRunner(app)
     await runner.setup()
