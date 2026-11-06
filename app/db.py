@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+from datetime import timedelta
 from pathlib import Path
 
 import aiosqlite
@@ -678,6 +679,94 @@ class Database:
         for row in rows:
             self._append_csv(row)
         return str(path)
+
+    async def directory(self, query: str = "") -> list[dict]:
+        needle = query.strip().lstrip("@").lower()
+        like = f"%{needle}%"
+        now = iso(utcnow())
+        async with self._lock:
+            cur = await self.db.execute(
+                """
+                SELECT u.telegram_id, u.username, u.first_name, u.email, u.created_at,
+                       u.pending_months, u.pending_promo, u.awaiting,
+                       s.months, s.price_kopecks, s.status, s.autopay, s.pan,
+                       s.access_until, s.charge_failed_at, s.retry_at, s.remove_at,
+                       s.rebill_id, s.updated_at
+                FROM users u
+                LEFT JOIN subscriptions s ON s.telegram_id = u.telegram_id
+                WHERE ? = ''
+                   OR CAST(u.telegram_id AS TEXT) LIKE ?
+                   OR lower(COALESCE(u.username, '')) LIKE ?
+                   OR lower(COALESCE(u.first_name, '')) LIKE ?
+                   OR lower(COALESCE(u.email, '')) LIKE ?
+                ORDER BY
+                    CASE
+                        WHEN s.status = 'active' AND s.access_until > ? THEN 0
+                        WHEN s.status = 'past_due' THEN 1
+                        ELSE 2
+                    END,
+                    COALESCE(s.access_until, '9999') ASC,
+                    u.telegram_id ASC
+                """,
+                (needle, like, like, like, like, now),
+            )
+            return [dict(row) for row in await cur.fetchall()]
+
+    async def admin_summary(self) -> dict:
+        now = utcnow()
+        now_iso = iso(now)
+        week_iso = iso(now + timedelta(days=7))
+        async with self._lock:
+            cur = await self.db.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN status = 'active' AND access_until > ? THEN 1 ELSE 0 END) AS active,
+                    SUM(CASE WHEN status = 'active' AND access_until > ? AND autopay = 1 AND rebill_id IS NOT NULL THEN 1 ELSE 0 END) AS autopay,
+                    SUM(CASE WHEN status = 'active' AND access_until > ? AND access_until <= ? THEN 1 ELSE 0 END) AS ending,
+                    SUM(CASE WHEN status = 'past_due' THEN 1 ELSE 0 END) AS past_due
+                FROM subscriptions
+                """,
+                (now_iso, now_iso, now_iso, week_iso),
+            )
+            counts = dict(await cur.fetchone())
+            cur = await self.db.execute(
+                "SELECT COALESCE(SUM(CASE WHEN kind = 'refund' THEN 0 ELSE amount END), 0) AS paid, "
+                "COALESCE(SUM(CASE WHEN kind = 'refund' THEN amount ELSE 0 END), 0) AS refunds "
+                "FROM ledger"
+            )
+            money = dict(await cur.fetchone())
+        return {
+            "active": int(counts["active"] or 0),
+            "autopay": int(counts["autopay"] or 0),
+            "ending": int(counts["ending"] or 0),
+            "past_due": int(counts["past_due"] or 0),
+            "paid": int(money["paid"] or 0),
+            "refunds": int(money["refunds"] or 0),
+        }
+
+    async def payments_for(self, telegram_id: int) -> list[dict]:
+        async with self._lock:
+            cur = await self.db.execute(
+                "SELECT * FROM payments WHERE telegram_id = ? ORDER BY created_at DESC",
+                (telegram_id,),
+            )
+            return [dict(row) for row in await cur.fetchall()]
+
+    async def ledger_for(self, telegram_id: int) -> list[dict]:
+        async with self._lock:
+            cur = await self.db.execute(
+                "SELECT * FROM ledger WHERE telegram_id = ? ORDER BY id DESC",
+                (telegram_id,),
+            )
+            return [dict(row) for row in await cur.fetchall()]
+
+    async def recent_ledger(self, limit: int = 200) -> list[dict]:
+        async with self._lock:
+            cur = await self.db.execute(
+                "SELECT * FROM ledger ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+            return [dict(row) for row in await cur.fetchall()]
 
     async def stats(self) -> dict:
         async with self._lock:

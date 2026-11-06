@@ -169,6 +169,10 @@ class AdminSiteTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Неверный пароль", await denied.text())
             page = await client.post("/admin/login", data={"password": "secret-pass"})
             html = await page.text()
+            self.assertIn("Клиенты", html)
+            self.assertIn("доступ открыт", html)
+            promos = await client.get("/admin/promos")
+            html = await promos.text()
             self.assertIn("Новый промокод", html)
             csrf = re.search(r'name="csrf" value="([^"]+)"', html)
             self.assertIsNotNone(csrf)
@@ -218,3 +222,50 @@ class AdminSiteTest(unittest.IsolatedAsyncioTestCase):
         promo = await self.db.promo("SITE20")
         self.assertEqual(promo["disabled"], 1)
         self.assertGreaterEqual(len(self.bot.messages), 2)
+
+    async def test_clients_show_term_price_and_payment(self):
+        await self.db.upsert_user(7, "nick", "Ник")
+        await self.db.set_email(7, "nick@mail.ru")
+        await self.db.save_subscription(
+            {
+                "telegram_id": 7,
+                "months": 3,
+                "price_kopecks": 1099000,
+                "status": "active",
+                "autopay": 0,
+                "access_until": "2026-12-01T10:00:00+00:00",
+            }
+        )
+        await self.db.add_ledger(
+            {
+                "created_at": "2026-11-03T07:00:00+00:00",
+                "order_id": "3m-7",
+                "payment_id": "9",
+                "telegram_id": 7,
+                "username": "nick",
+                "email": "nick@mail.ru",
+                "months": 3,
+                "amount": 1099000,
+                "kind": "payment",
+                "period_start": "2026-11-03T07:00:00+00:00",
+                "period_end": "2026-12-01T10:00:00+00:00",
+            }
+        )
+        async with TestClient(TestServer(self.app)) as client:
+            await client.post("/admin/login", data={"password": "secret-pass"})
+            found = await client.get("/admin", params={"q": "nick@mail.ru"})
+            html = await found.text()
+            self.assertIn("@nick", html)
+            self.assertIn("3 месяца", html)
+            self.assertIn("10 990", html)
+            self.assertIn("доступ открыт", html)
+            card = await client.get("/admin/clients/7")
+            card_html = await card.text()
+            self.assertIn("nick@mail.ru", card_html)
+            self.assertIn("10 990", card_html)
+            self.assertIn("1 декабря", card_html)
+            missing = await client.get("/admin/clients/404")
+            self.assertIn("Нет такого клиента", await missing.text())
+            payments = await client.get("/admin/payments")
+            self.assertIn("10 990", await payments.text())
+            self.assertIn("Оплата", await payments.text())
